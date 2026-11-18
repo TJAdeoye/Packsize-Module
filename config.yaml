@@ -1,0 +1,223 @@
+# ============================================================================
+#  Packsize Module - configuration
+#  Power Stop LLC / HK1
+#
+#  Everything the pipeline needs lives here. No paths, thresholds or business
+#  rules are hardcoded in the Python. Edit this file, not the scripts.
+# ============================================================================
+
+meta:
+  site: HK1
+  module: Packsize Module
+  owner: Olatunji Adeoye
+  timezone: America/Chicago          # local time the plant runs on
+
+# ----------------------------------------------------------------------------
+# Paths
+#   root      = the Packsize Module folder on OneDrive
+#   Everything else is resolved relative to root unless given as absolute.
+#   Both drop folders are MANUAL daily drops: the pipeline reads every file it
+#   finds, concatenates, and de-duplicates. Dropping a full re-export or a
+#   single day both work; overlapping rows collapse.
+# ----------------------------------------------------------------------------
+paths:
+  root: 'C:\Users\Olatunji.Adeoye\OneDrive - Power Stop, LLC\Documents\HK1 Projects 2026\Packsize Module'
+  production_drop: 'Carton Production File'
+  error_drop: 'Error Excel File'
+  output_html: 'Packsize_Dashboard.html'
+  data_json: 'Configuration\packsize_data.json'
+  archive: 'Configuration\archive'          # processed-file fingerprints + daily snapshots
+  log: 'Configuration\packsize_run.log'
+
+file_patterns:
+  production: ['*.csv', '*.xlsx', '*.xls']
+  error: ['*.csv', '*.xlsx', '*.xls']
+  # Files whose name matches any of these are skipped (Excel lock files, temp)
+  ignore: ['~$*', '*.tmp', '.*']
+
+# ----------------------------------------------------------------------------
+# Column mapping
+#   Left  = the name this pipeline uses internally
+#   Right = the header PackNet actually exports. If Packsize changes an export
+#           header, change it here and nothing else breaks.
+# ----------------------------------------------------------------------------
+columns:
+  production:
+    timestamp: 'Timestamp'
+    cartons: 'Cartons Produced'
+    machine: 'Machine'
+    sku: 'Article Name'            # the box SKU shown in the daily breakdown
+    design: 'Design Name'
+    zfold: 'z-Fold Name'
+    box_w: 'Box Width (in.)'
+    box_l: 'Box Length (in.)'
+    box_h: 'Box Height (in.)'
+    zfold_area: 'Total z-Fold Area (sq. ft.)'
+    trim_area: 'Trim Area (sq. ft.)'
+    trim_pct: 'Trim %'
+    optimal: 'Produced Optimally'
+    cycle_sec: 'Cycle Time In Seconds'
+    successful: 'Successful'
+  error:
+    timestamp: 'Timestamp'
+    machine: 'Machine Alias'
+    code: 'Error Code'
+    message: 'Error Message'
+    status: 'Status'
+
+# ----------------------------------------------------------------------------
+# Shift definition
+#   Current state: one shift, 2 associates, 05:30-14:00, Mon-Fri.
+#   labor_hours_per_day = associates x paid_hours  -> the throughput denominator.
+#   Add a second shift by appending to `shifts` and raising `associates`.
+# ----------------------------------------------------------------------------
+shift:
+  count: 1                       # number of shifts currently running
+  name: '1st Shift'
+  start: '05:30'
+  end: '14:00'
+  paid_hours: 8.0                # 8.5 span less 30 min unpaid meal
+  associates: 2                  # per shift
+  machines: [705164, 706614]
+  scheduled_hours_per_machine: 8.0
+  workdays: [0, 1, 2, 3, 4]      # Mon=0 .. Sun=6
+
+# ----------------------------------------------------------------------------
+# Machine capability
+#   rated_boxes_per_hour comes from the Packsize design team (Sep 2026) and is
+#   the sustained design rate for one machine.
+#
+#   CONCURRENCY: two machines are installed but the crew runs ONE at a time,
+#   so every denominator uses `concurrent`, not the installed count. Verified
+#   against the data: on days when both machines log cycles, the median
+#   concurrent running time is only ~16% of the smaller machine's active
+#   minutes - they alternate rather than run in parallel.
+#       scheduled machine-hours = concurrent x paid_hours   = 1 x 8  =  8
+#       theoretical day = rated_bph x concurrent x paid_hours = 175 x 1 x 8 = 1,400
+#   Three days in the Jul-Sep window exceeded 1,400 cartons; those necessarily
+#   ran both machines and are flagged on the dashboard.
+#
+#   NOTE on anchoring: the export's `Cycle Time In Seconds` field yields ~377
+#   boxes per running machine-hour, which is more than double the 175 rating.
+#   That field therefore does not capture full machine occupancy (feed, indexing
+#   and handling are excluded), so it cannot be compared with the rating.
+#   Capacity attainment is measured against SCHEDULED hours instead.
+# ----------------------------------------------------------------------------
+machine:
+  installed: [705164, 706614]
+  aliases:                       # short names used on the dashboard tabs
+    705164: MG1
+    706614: MG2
+  concurrent: 1                  # ACTUAL: the crew runs one machine at a time
+  associates_per_machine: 1      # SPEC: Packsize rates 1 associate = 1 machine = 175/hr
+  rated_boxes_per_hour: 175
+  rating_source: 'Packsize (Tim Williams), 11 Sep 2026'
+
+# The two lines above are deliberately different, and the gap between them is
+# the single largest opportunity on this line:
+#     machines that SHOULD run = associates / associates_per_machine = 2 / 1 = 2
+#     machines that DO run     = concurrent                          =         1
+# Two associates sharing one machine caps output at 50% of spec before the
+# shift even starts. `concurrent` drives the physical machine-hour
+# denominators (availability, utilization); the spec count drives the target.
+
+# ----------------------------------------------------------------------------
+# Data handling rules
+#   error_log_is_utc: PackNet exports the event log in UTC while the production
+#     export is local. Verified 09-Sep-2026: after conversion, event volume
+#     spikes at 05:30 and stops at 14:00. Set false only if Packsize changes it.
+#
+#   boundary_estop: 278 of 610 EmergencyStop events land within minutes of
+#     shift start / end - the crew uses the e-stop as a power switch. These are
+#     excluded from fault counts. Everything else is a genuine fault.
+#
+#   min_cartons_production_day: days below this are calibration / install /
+#     non-running days and are excluded from all statistics.
+# ----------------------------------------------------------------------------
+rules:
+  error_log_is_utc: true
+  min_cartons_production_day: 50
+  idle_gap_threshold_sec: 300           # a gap over 5 min counts as idle
+  boundary_estop:
+    message: 'EmergencyStop'
+    before_hour: 6.0                    # local decimal hour
+    after_hour: 13.0
+  clean_day_max_faults: 1               # definition used to derive the standard
+
+# ----------------------------------------------------------------------------
+# The standard  -  ENGINEERED (Packsize)
+#
+#   Source: Tim Williams, Packsize, 11 Sep 2026.
+#   175 cartons/hour is PER MACHINE and is already a calculated, derated rate.
+#   It factors in:
+#       - mechanical limits of the EM7
+#       - box style / design (some designs cycle slower)
+#       - tiling frequency (multiple boxes per cycle)
+#       - machine efficiency at 85% OEE
+#       - PF&D at 25% (personal, fatigue and delay - the human factor)
+#
+#   So 175/hr is NOT a theoretical maximum. Downtime and human factors are
+#   already discounted, which makes it a fair expectation for a staffed,
+#   fed machine rather than a lab number.
+#       implied raw mechanical rate = 175 / (0.85 x 0.75) = ~275 cartons/hr
+#
+#   THE STANDARD (spec staffing: each associate runs their own machine):
+#       175 cartons/hr  x  2 associates  x  8 hours  =  2,800 cartons/day
+#       per labour-hour = 175, flat - one associate, one machine, one hour.
+#       The per-labour-hour standard does not move with headcount; that is what
+#       makes it a fair test of whether a second associate is adding output.
+#
+#   Attainment currently averages 27% of 2,800. Half of that shortfall is the
+#   staffing model (two associates on one machine); the rest is starvation.
+#   Best day on record, 1,540 cartons, is 55% of spec.
+#
+#   Because 175/hr already embeds 85% OEE, the availability and utilization
+#   figures below are DIAGNOSTIC - they explain a missed day - rather than
+#   independent targets. Do not add their losses on top of the 175 rate.
+# ----------------------------------------------------------------------------
+standard:
+  basis: 'engineered'             # engineered | best-demonstrated
+  source: 'Packsize (Tim Williams), 11 Sep 2026'
+  derived_on: '2026-09-11'
+
+  throughput_cph: 175.0           # per associate per hour - flat, per Packsize
+  throughput_stretch_cph: 175.0   # the rate is the rate; there is no stretch above spec
+  cartons_per_day: 2800           # 175/hr x 2 associates x 8 hrs
+
+  capacity_attainment_pct: 100.0  # the engineered rate IS the standard
+
+  # Diagnostics - derived from the line's own history, used to explain a miss.
+  availability_pct: 95.0          # 1 - (fault downtime / scheduled)
+  utilization_pct: 42.0           # running time / scheduled (p90 of window days)
+  max_fault_events: 2             # per production day (p25)
+  max_trim_pct: 12.4              # trailing window baseline
+  min_optimal_pct: 81.0           # trailing window baseline
+  max_failure_pct: 0.30           # guardrail
+
+  # Retained for reference - the pre-11-Sep basis.
+  prior_basis: 'best-demonstrated, p75 of 11 clean days'
+  prior_throughput_cph: 79.0
+  prior_cartons_per_day: 1264
+
+# ----------------------------------------------------------------------------
+# Dashboard status bands, expressed as a fraction of standard.
+#   >= on_target        -> green
+#   >= watch            -> amber
+#   below               -> red
+# For "lower is better" metrics (trim, faults) the comparison is inverted.
+# ----------------------------------------------------------------------------
+thresholds:
+  on_target: 1.00
+  watch: 0.85
+
+# ----------------------------------------------------------------------------
+# Output
+# ----------------------------------------------------------------------------
+dashboard:
+  title: 'Packsize Production'
+  subtitle: 'HK1 - daily performance against standard'
+  default_view: 'daily'           # daily | monthly | quarterly | yearly
+  show_footer: false              # derivation / source notes at the bottom of the page
+  sku_top_n: 8                    # SKUs listed in the cartons tile before 'other'
+  daily_trend_days: 30            # bars shown on the daily view
+  chart_js_cdn: 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js'
